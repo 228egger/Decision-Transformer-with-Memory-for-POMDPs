@@ -130,15 +130,23 @@ class MemoryDecisionTransformer(nn.Module):
         
         # Memory module (optional)
         if memory_type == 'gru':
-            # TODO: Implement GRU memory
+            self.memory = nn.GRU(n_embed, memory_dim, n_layer, dropout=dropout, batch_first=True)
             self.memory_proj = nn.Linear(memory_dim, n_embed)
         elif memory_type == 'lstm':
-            # TODO: Implement LSTM memory
+            self.memory = nn.LSTM(n_embed, memory_dim, n_layer, dropout=dropout, batch_first=True)
             self.memory_proj = nn.Linear(memory_dim, n_embed)
+        elif memory_type == 'transformer':
+            memory_layer = nn.TransformerEncoderLayer(
+                d_model=n_embed, 
+                nhead=2, 
+                dim_feedforward=2*n_embed, 
+                dropout=dropout, 
+                batch_first=True
+            )
+            self.memory = nn.TransformerEncoder(memory_layer, num_layers=1)
+            self.memory_proj = nn.Linear(n_embed, n_embed)
         else:
             self.memory = None
-        
-        # Transformer
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=n_embed,
             nhead=n_head,
@@ -185,15 +193,28 @@ class MemoryDecisionTransformer(nn.Module):
         if self.memory is not None:
             if self.memory_type == 'gru':
                 if self.hidden_state is None:
-                    # TODO: Implement GRU memory
-                
+                    self.hidden_state = torch.zeros(
+                        self.memory.num_layers, batch_size, self.memory.hidden_size,
+                        device=state_embeddings.device, dtype=state_embeddings.dtype
+                    )
                 memory_out, self.hidden_state = self.memory(state_embeddings, self.hidden_state)
             elif self.memory_type == 'lstm':
                 if self.hidden_state is None:
-                    # TODO: Implement LSTM memory
-                
-                memory_out, self.hidden_state = self.memory(state_embeddings, self.hidden_state)
-            
+                    h0 = torch.zeros(self.memory.num_layers, batch_size, self.memory.hidden_size, 
+                         device=state_embeddings.device, dtype=state_embeddings.dtype)
+                    c0 = torch.zeros(self.memory.num_layers, batch_size, self.memory.hidden_size, 
+                                    device=state_embeddings.device, dtype=state_embeddings.dtype)
+                    self.hidden_state = (h0, c0)
+                memory_out, (h, c) = self.memory(state_embeddings, self.hidden_state)
+                self.hidden_state = (h.detach(), c.detach())
+            elif self.memory_type == 'transformer':
+                if self.hidden_state is None:
+                    mem_seq_len = state_embeddings.shape[1]
+                    mem_mask = torch.triu(
+                        torch.ones(mem_seq_len, mem_seq_len, dtype=torch.bool, device=state_embeddings.device),
+                        diagonal=1
+                    )
+                    memory_out = self.memory(state_embeddings, mask=mem_mask)            
             # project memory to embedding dimension
             memory_embedding = self.memory_proj(memory_out)
             
@@ -201,6 +222,9 @@ class MemoryDecisionTransformer(nn.Module):
             state_embeddings = state_embeddings + memory_embedding
         
         # prepare sequence for transformer (R_t, o_t, a_t)
+        
+        # apply transformer
+        # create causal attention mask
         sequence = torch.cat([
             return_embeddings, 
             state_embeddings,
@@ -209,9 +233,6 @@ class MemoryDecisionTransformer(nn.Module):
         
         # add positional encoding
         sequence = self.pos_encoder(sequence)
-        
-        # apply transformer
-        # create causal attention mask
         seq_len = sequence.size(1)
         mask = torch.triu(
             torch.ones(seq_len, seq_len, dtype=torch.bool, device=sequence.device), 
@@ -311,7 +332,8 @@ def train_memory_dt(
         dropout=0.1
     )
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
+
     model.to(device)
     
     # Mini-inference each epoch
@@ -882,7 +904,7 @@ if __name__ == "__main__":
     parser.add_argument('--env', type=str, default='velocity_cartpole', 
                       choices=['velocity_cartpole', 'flickering_pendulum', 'lidar_mountain_car'], 
                       help='Environment name')
-    parser.add_argument('--memory', type=str, default='gru', choices=['gru', 'lstm', 'none'], 
+    parser.add_argument('--memory', type=str, default='gru', choices=['gru', 'lstm', 'transformer', 'none'], 
                       help='Memory type')
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
     
